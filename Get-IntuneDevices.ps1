@@ -43,6 +43,7 @@ foreach ($device in $devices) {
         "Device ID" = $device.id
         "Device Name" = $device.deviceName
         "User" = $device.userDisplayName
+        "Compliant" = $device.ComplianceState
         "AutoPilot Device" = $device.isAutopilotEnrolled
         "Enrollment Type" = $device.deviceEnrollmentType
         "Device Type" = $device.managedDeviceOwnerType
@@ -59,4 +60,4 @@ foreach ($device in $devices) {
 }
 
 # Output the table to a CSV file in the desired order
-$table | Select-Object "Device ID", "Device Name", "User", "AutoPilot Device", "Enrollment Type", "Device Type", "OS", "OS Version","Encryption Enabled", "Last Check-In", "CheckInOver30Days", "Storage Used (GB)", "Storage Percentage", "StorageGreaterThan90%" | Export-Csv -Encoding utf8 -NoTypeInformation -Path "$($FilePath)\IntuneDevices.csv"
+$table | Select-Object "Device ID", "Device Name", "User", "Compliant", "AutoPilot Device", "Enrollment Type", "Device Type", "OS", "OS Version","Encryption Enabled", "Last Check-In", "CheckInOver30Days", "Storage Used (GB)", "Storage Percentage", "StorageGreaterThan90%" | Export-Csv -Encoding utf8 -NoTypeInformation -Path "$($FilePath)\IntuneDevices.csv"
