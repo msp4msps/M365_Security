@@ -2,8 +2,8 @@
 Repository for hosting security related PowerShell scripts.
 
 [![github-follow](https://img.shields.io/github/followers/msp4msps?label=Follow&logoColor=purple&style=social)](https://github.com/msp4msps)
-[![project-languages-used](https://img.shields.io/github/languages/count/msp4msps/tech_blog?color=important)](https://github.com/msp4msps/M365_Security)
-[![project-top-language](https://img.shields.io/github/languages/top/msp4msps/tech_blog?color=blueviolet)](https://github.com/msp4msps/M365_Security)
+[![project-languages-used](https://img.shields.io/github/languages/count/msp4msps/M365_Security?color=important)](https://github.com/msp4msps/M365_Security)
+[![project-top-language](https://img.shields.io/github/languages/top/msp4msps/M365_Security?color=blueviolet)](https://github.com/msp4msps/M365_Security)
 [![license](https://img.shields.io/badge/License-MIT-brightgreen.svg)](https://choosealicense.com/licenses/mit/)
 
 ## Authenticating
