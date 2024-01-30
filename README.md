@@ -36,6 +36,7 @@ Get-DataProtectionSettings
 
 **Get-DataProtectionSettings**
 -This Script collects SharePoint Settings, DLP Policies, Retention Policies, Information Protection Labels, and Label Policies
+-Review the prerequisite of setting up the Secure Application Model prior to running the script to get the secrets you will need to acquire an access token. 
 - Run the script 
 - Provide a UPN of a Global Admin that can connect to Security and Compliance PowerShell ex: admin@novacoastschool.com (no quotes)
 - Provide your Secure Application Model secrets to get an AccessToken
