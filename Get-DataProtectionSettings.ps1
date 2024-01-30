@@ -112,7 +112,6 @@ foreach ($policy in $retentionPolicies) {
     switch ($rules.ExpirationDateOption) {
         "ModificationAgeInDays" {$rules.ExpirationDateOption = "Based on last modified date"}
         "CreationAgeInDays" {$rules.ExpirationDateOption = "Based on created date"}
-        "FixedDate" {$rules.ExpirationDateOption = "Fixed Date"}
         default {$rules.ExpirationDateOption = $rules.ExpirationDateOption}
     }
     $policy | Add-Member -MemberType NoteProperty -Name "ComplianceAction" -Value $rules.RetentionComplianceAction
