@@ -21,6 +21,9 @@ Get-DisabledUsers
 Get-IntuneDevices
 - DeviceManagementServiceConfig.Read.All, DeviceManagementManagedDevices.Read.All
 
+Get-DataProtectionSettings
+-SharePointTenantSettings.Read.All
+
 ## Instructions 
 
 **Get-IntuneDevices**
@@ -30,3 +33,10 @@ Get-IntuneDevices
 - The Script will provide a CSV of all Intune Devices
 
 <kbd>![screenshot1](Screenshots/IntuneDevices.jpg)</kbd>
+
+**Get-DataProtectionSettings**
+-This Script collects SharePoint Settings, DLP Policies, Retention Policies, Information Protection Labels, and Label Policies
+- Run the script 
+- Provide a UPN of a Global Admin that can connect to Security and Compliance PowerShell ex: admin@novacoastschool.com (no quotes)
+- Provide your Secure Application Model secrets to get an AccessToken
+- The Script will provide a JSON of all policy information in the Temp folder of you C Drive

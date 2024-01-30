@@ -7,7 +7,7 @@ function Get-AccessToken {
         [string]$clientSecret,
 
         [Parameter(Mandatory=$true)]
-        [string]$tenantID = "common", # Your tenantID
+        [string]$tenantID, # Your tenantID
 
         [Parameter(Mandatory=$true)]
         [string]$refreshToken, # Your refreshToken
