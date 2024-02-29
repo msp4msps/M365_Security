@@ -24,6 +24,9 @@ Get-IntuneDevices
 Get-DataProtectionSettings
 -SharePointTenantSettings.Read.All
 
+Get-CAPExcludedUsers
+-Directory.Read.All,Policy.Read.All,GroupMember.ReadWrite.All
+
 ## Instructions 
 
 **Get-IntuneDevices**
@@ -41,3 +44,12 @@ Get-DataProtectionSettings
 - Provide a UPN of a Global Admin that can connect to Security and Compliance PowerShell ex: admin@novacoastschool.com (no quotes)
 - Provide your Secure Application Model secrets to get an AccessToken
 - The Script will provide a JSON of all policy information in the Temp folder of you C Drive
+
+
+**Get-CAPExcludedUsers**
+-This script records all users being excluded from each conditional acccess policy in a tenant. This includes direct exclusions or exclusions as part of a group. This script should help you identify any misconfigurations in policies. Genernally, you should not have licensed users excluded in your policy definition. 
+- CD into the file path you want to have the CSV file output
+- Use the GetAccessToken.ps1 script to get an AccessToken for the script. 
+- Provide your Secure Application Model secrets to get an AccessToken
+- Run the script 
+- The Script will output a CSV file in the location you navigate to
