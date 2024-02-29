@@ -47,7 +47,7 @@ Get-CAPExcludedUsers
 
 
 **Get-CAPExcludedUsers**
--This script records all users being excluded from each conditional acccess policy in a tenant. This includes direct exclusions or exclusions as part of a group. This script should help you identify any misconfigurations in policies. Genernally, you should not have licensed users excluded in your policy definition. 
+-This script records all users being excluded from each conditional access policy in a tenant. This includes direct exclusions or exclusions as part of a group. This script should help you identify any misconfigurations in policies. Generally, you should not have licensed users excluded in your policy definition. 
 - CD into the file path you want to have the CSV file output
 - Use the GetAccessToken.ps1 script to get an AccessToken for the script. 
 - Provide your Secure Application Model secrets to get an AccessToken
