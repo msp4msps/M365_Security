@@ -27,6 +27,9 @@ Get-DataProtectionSettings
 Get-CAPExcludedUsers
 -Directory.Read.All,Policy.Read.All,GroupMember.ReadWrite.All
 
+Get-MFAStats
+-Directory.Read.All,Policy.Read.All,AuditLog.Read.All
+
 ## Instructions 
 
 **Get-IntuneDevices**
@@ -52,4 +55,12 @@ Get-CAPExcludedUsers
 - Use the GetAccessToken.ps1 script to get an AccessToken for the script. 
 - Provide your Secure Application Model secrets to get an AccessToken
 - Run the script 
+- The Script will output a CSV file in the location you navigate to
+
+
+**Get-MFAStats**
+-This script records all users MFA registration details including what primary MFA method a user leverages.Make sure you follow the readME if you have not already to get your Secure application model secrets.
+- CD into the file path you want to have the CSV file output
+- Run the script 
+- Provide your Secure Application Model secrets to get an AccessToken
 - The Script will output a CSV file in the location you navigate to
