@@ -32,6 +32,13 @@ Get-MFAStats
 
 ## Instructions 
 
+**BECInvestigation**
+- Traverse to the file path where the script is located
+- Provide the user you want to investigate by UPN and enter the secrets + Tenant ID
+- The Script will provide any log records related to recent MFA changes/registration, registered devices, or applications the user has consented to. 
+
+<kbd>![screenshot1](Screenshots/BEC.jpg)</kbd>
+
 **Get-IntuneDevices**
 - Run the script 
 - Provide your Secure Application Model secrets to get an AccessToken
