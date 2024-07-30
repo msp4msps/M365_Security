@@ -32,6 +32,14 @@ Get-MFAStats
 
 ## Instructions 
 
+**Get Anonymous Links**
+- Traverse to the file path where the script is located
+- Run the file and specify the SharePoint URL you want to run the assessment on. Specify the name of the tenant you will be running the assessment on as well
+- Sign in and consent with a Global admin in that tenant. 
+-You will be prompted to review the report if there are any records returned. 
+
+<kbd>![screenshot1](Screenshots/anonymous.jpg)</kbd>
+
 **BECInvestigation**
 - Traverse to the file path where the script is located
 - Provide the user you want to investigate by UPN and enter the secrets + Tenant ID
