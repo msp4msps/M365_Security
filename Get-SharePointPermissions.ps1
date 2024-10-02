@@ -83,21 +83,6 @@ Function Get-PnPPermissions([Microsoft.SharePoint.Client.SecurableObject]$Object
             #Define Granted through if text starts with SharingLinks
             if($RoleAssignment.Member.LoginName -like "*SharingLinks*") {
                 $GrantedThrough = "Sharing Link"      
-                    $Ctx = Get-PnPContext
-                    $SharingInfo = [Microsoft.SharePoint.Client.ObjectSharingInformation]::GetObjectSharingInformation($Ctx, $Object, $false, $false, $false, $true, $true, $true, $true)
-                    $Ctx.Load($SharingInfo)
-                    $Ctx.ExecuteQuery()
-
-                    $test = $SharingInfo.SharingLinks | Select-Object 
-                    write-Host $test
-            
-                    ForEach ($ShareLink in $SharingInfo.SharingLinks) {     
-                        If($ShareLink.Created -ne ""){
-                            $ShareLinkVariable = $ShareLink.LinkKind
-                            write-Host $ShareLink.LinkKind
-                            Continue 
-                        }
-                    }
                         
             } else {
                 $GrantedThrough = "SharePoint Group: $($RoleAssignment.Member.LoginName)"
@@ -126,7 +111,6 @@ Function Get-PnPPermissions([Microsoft.SharePoint.Client.SecurableObject]$Object
                 $Permissions | Add-Member NoteProperty Type($PermissionType)
                 $Permissions | Add-Member NoteProperty Permissions($PermissionLevels)
                 $Permissions | Add-Member NoteProperty GrantedThrough($GrantedThrough)
-                $Permissions | Add-Member NoteProperty LinkType($ShareLinkVariable)
                 $PermissionCollection += $Permissions
             }
         }
@@ -145,7 +129,6 @@ Function Get-PnPPermissions([Microsoft.SharePoint.Client.SecurableObject]$Object
             $Permissions | Add-Member NoteProperty Type($PermissionType)
             $Permissions | Add-Member NoteProperty Permissions($PermissionLevels)
             $Permissions | Add-Member NoteProperty GrantedThrough("Direct Permissions")
-            $Permissions | Add-Member NoteProperty LinkType($ShareLink.LinkKind)
             $PermissionCollection += $Permissions
         }
     }
@@ -189,7 +172,6 @@ Function Generate-PnPSitePermissionRpt()
         $Permissions | Add-Member NoteProperty Type("Site Collection Administrators")
         $Permissions | Add-Member NoteProperty Permissions("Site Owner")
         $Permissions | Add-Member NoteProperty GrantedThrough("Direct Permissions")
-        $Permissions | Add-Member NoteProperty LinkType("N/A")
                
         #Export Permissions to CSV File
         $Permissions | Export-CSV $ReportFile -NoTypeInformation
