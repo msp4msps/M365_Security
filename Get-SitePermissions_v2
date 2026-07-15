@@ -1,0 +1,503 @@
+<#
+.SYNOPSIS
+    Generates a permission report for every SharePoint site in a tenant and exports to a single CSV.
+
+.DESCRIPTION
+    Connects to the SharePoint admin center, enumerates all site collections,
+    then loops through each site collecting:
+      - Site Collection Administrators
+      - Direct user permissions
+      - SharePoint group membership (expanded to individual users)
+      - Everyone / Everyone Except External Users claims with their actual permission levels
+      - M365 Group Owners and Members (for group-connected sites)
+    All results are appended to one CSV file.
+
+    Supports two auth modes:
+      Interactive (delegated): quick ad hoc runs. Note that a delegated token only reads
+        sites where the signed-in account has permission. SharePoint Administrator role
+        alone does not grant content access to every site.
+      AppOnly (certificate): recommended for full-tenant coverage and unattended runs.
+        Requires an app registration with SharePoint > Sites.FullControl.All (application)
+        and Graph > Group.Read.All (application) for M365 group membership, plus a certificate.
+
+.PARAMETER TenantAdminURL
+    The SharePoint admin center URL, e.g. https://contoso-admin.sharepoint.com
+
+.PARAMETER ClientId
+    The Entra app registration Client ID (GUID).
+
+.PARAMETER Tenant
+    The tenant, e.g. contoso.onmicrosoft.com. Required for app-only auth.
+
+.PARAMETER CertificateThumbprint
+    Thumbprint of a certificate in the CurrentUser or LocalMachine store that is
+    uploaded to the app registration. Presence of this parameter switches to app-only auth.
+
+.PARAMETER ReportFile
+    Path to the output CSV. Defaults to a timestamped file in the user's Documents folder.
+    Avoid world-writable locations like C:\Temp; this report is a recon map of your tenant.
+
+.PARAMETER IncludeOneDrive
+    Switch to include OneDrive personal sites in the report. Excluded by default.
+
+.EXAMPLE
+    .\Get-AllSitePermissions.ps1 -TenantAdminURL "https://contoso-admin.sharepoint.com" -ClientId "guid"
+
+.EXAMPLE
+    .\Get-AllSitePermissions.ps1 -TenantAdminURL "https://contoso-admin.sharepoint.com" `
+        -ClientId "guid" -Tenant "contoso.onmicrosoft.com" -CertificateThumbprint "ABC123..."
+#>
+
+[CmdletBinding(DefaultParameterSetName = 'Interactive')]
+param (
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^https://[a-zA-Z0-9\-]+-admin\.sharepoint\.(com|us|de|cn)/?$')]
+    [string] $TenantAdminURL,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateScript({ [guid]::TryParse($_, [ref][guid]::Empty) })]
+    [string] $ClientId,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'AppOnly')]
+    [string] $Tenant,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'AppOnly')]
+    [ValidatePattern('^[0-9a-fA-F]{40}$')]
+    [string] $CertificateThumbprint,
+
+    [string] $ReportFile = (Join-Path ([Environment]::GetFolderPath('MyDocuments')) ("TenantSitePermissionRpt_{0}.csv" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))),
+
+    [switch] $IncludeOneDrive,
+
+    # Use device code flow instead of browser popup. Workaround for interactive
+    # hangs caused by a missing http://localhost redirect URI on the app registration.
+    [Parameter(ParameterSetName = 'Interactive')]
+    [switch] $DeviceLogin
+)
+
+$ErrorActionPreference = 'Stop'
+$Script:AppOnly = $PSCmdlet.ParameterSetName -eq 'AppOnly'
+
+# ============================================================
+# Helpers
+# ============================================================
+
+# Prevent CSV injection: display names and titles are user-controlled text.
+# A value starting with = + - @ or a tab executes as a formula when the CSV
+# is opened in Excel. Prefix with a single quote to neutralize.
+function Protect-CsvValue {
+    param ([string] $Value)
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    if ($Value[0] -in @('=', '+', '-', '@', "`t", "`r")) {
+        return "'" + $Value
+    }
+    return $Value
+}
+
+function New-PermissionRow {
+    param (
+        [string] $Object, [string] $Title, [string] $URL, $HasUniquePermissions,
+        [string] $Users, [string] $UserPrincipalName, [string] $Type,
+        [string] $Permissions, [string] $GrantedThrough
+    )
+    [PSCustomObject]@{
+        Object               = $Object
+        Title                = Protect-CsvValue $Title
+        URL                  = $URL
+        HasUniquePermissions = $HasUniquePermissions
+        Users                = Protect-CsvValue $Users
+        UserPrincipalName    = Protect-CsvValue $UserPrincipalName
+        Type                 = $Type
+        Permissions          = $Permissions
+        GrantedThrough       = Protect-CsvValue $GrantedThrough
+    }
+}
+
+# Friendly labels matching the SharePoint admin center UI. Keyed on both the
+# numeric value and the enum name because PnP returns either depending on version.
+$Script:SharingCapabilityMap = @{
+    '0' = 'Only people in your organization'; 'Disabled'                        = 'Only people in your organization'
+    '1' = 'New and existing guests';          'ExternalUserSharingOnly'         = 'New and existing guests'
+    '2' = 'Anyone';                           'ExternalUserAndGuestSharing'     = 'Anyone'
+    '3' = 'Existing guests only';             'ExistingExternalUserSharingOnly' = 'Existing guests only'
+}
+
+$Script:DefaultSharingLinkTypeMap = @{
+    '0' = 'Inherited from org-wide default';  'None'            = 'Inherited from org-wide default'
+    '1' = 'People with existing access';      'Direct'          = 'People with existing access'
+    '2' = 'Only people in your organization'; 'Internal'        = 'Only people in your organization'
+    '3' = 'Anyone with the link';             'AnonymousAccess' = 'Anyone with the link'
+}
+
+$Script:DefaultLinkPermissionMap = @{
+    '0' = 'Inherited from org-wide default'; 'None' = 'Inherited from org-wide default'
+    '1' = 'View';                            'View' = 'View'
+    '2' = 'Edit';                            'Edit' = 'Edit'
+}
+
+function ConvertTo-FriendlySetting {
+    param ($Value, [hashtable] $Map)
+    $Key = "$Value".Trim()
+    if ([string]::IsNullOrEmpty($Key)) { return 'Unknown' }
+    if ($Map.ContainsKey($Key)) { return $Map[$Key] }
+    return $Key   # unmapped values pass through raw rather than hiding data
+}
+
+function Connect-TargetSite {
+    param ([string] $Url)
+    if ($Script:AppOnly) {
+        Connect-PnPOnline -Url $Url -ClientId $ClientId -Tenant $Tenant -Thumbprint $CertificateThumbprint
+    }
+    elseif ($DeviceLogin) {
+        # Device code flow: no localhost redirect needed. Prompts once, then cached.
+        Connect-PnPOnline -Url $Url -DeviceLogin -ClientId $ClientId
+    }
+    else {
+        # Interactive prompts once; subsequent connects reuse the cached token silently.
+        # Requires http://localhost redirect URI + public client flows enabled on the app.
+        Connect-PnPOnline -Url $Url -Interactive -ClientId $ClientId
+    }
+}
+
+# Retrieve a Graph collection with paging (memberships over 100 span pages).
+# Normalize to PSCustomObjects via JSON round trip: depending on PnP version,
+# Invoke-PnPGraphMethod returns dictionary/JsonElement types where dot-property
+# access silently returns null, which produced blank report rows.
+function Get-GraphCollection {
+    param ([string] $Url)
+    $Items = [System.Collections.Generic.List[object]]::new()
+    do {
+        try {
+            $Resp = (Invoke-PnPGraphMethod -Url $Url -Raw) | ConvertFrom-Json
+        }
+        catch {
+            $Resp = Invoke-PnPGraphMethod -Url $Url | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+        }
+        if ($Resp.value) { foreach ($I in $Resp.value) { $Items.Add($I) } }
+        $Url = $Resp.'@odata.nextLink'
+    } while ($Url)
+    return ,$Items
+}
+
+# Classify a principal purely from its claims-encoded LoginName. This avoids
+# one to two CSOM round trips per group member, which is where most of the
+# runtime went in the original script.
+function Resolve-Principal {
+    param ([string] $LoginName, [string] $Title)
+
+    $ln = $LoginName.ToLower()
+
+    # System and service principals that should be excluded from the report
+    if ($ln -match 'sharepoint\\system|app@sharepoint|spocrawler|_spocache|_spfarm|nt service\\') {
+        return $null
+    }
+
+    # Everyone (all users including external): c:0(.s|true
+    if ($ln -eq 'c:0(.s|true') {
+        return @{ Users = 'Everyone'; UPN = 'Built-in'; Type = 'Claim (Everyone)' }
+    }
+
+    # Everyone Except External Users: c:0-.f|rolemanager|spo-grid-all-users/{tenantid}
+    if ($ln -like '*spo-grid-all-users*' -or $ln -like '*allusers*') {
+        return @{ Users = 'Everyone Except External Users'; UPN = 'Built-in'; Type = 'Claim (EEEU)' }
+    }
+
+    # Entra security group nested in a SharePoint group: c:0t.c|tenant|{guid}
+    if ($ln -like 'c:0t.c|tenant|*') {
+        return @{ Users = $Title; UPN = "GroupId: $(($ln -split '\|')[-1])"; Type = 'Entra Security Group (not expanded)' }
+    }
+
+    # M365 group claim: c:0o.c|federateddirectoryclaimprovider|{guid}
+    # A trailing _o on the guid means the owners subset of that group
+    if ($ln -like 'c:0o.c|federateddirectoryclaimprovider|*') {
+        $Id = ($ln -split '\|')[-1]
+        $IsOwners = $Id -like '*_o'
+        $Id = $Id -replace '_o$', ''
+        $Scope = if ($IsOwners) { ' (owners)' } else { '' }
+        return @{ Users = $Title; UPN = "GroupId: $Id$Scope"; Type = 'M365 Group Claim'; Id = $Id; IsOwners = $IsOwners }
+    }
+
+    # Standard federated user: i:0#.f|membership|user@domain.com
+    if ($ln -like 'i:0#.f|membership|*') {
+        return @{ Users = $Title; UPN = ($ln -split '\|')[-1]; Type = 'User' }
+    }
+
+    # Anything else (guest claims etc.): keep it, best-effort UPN
+    $upn = if ($ln -like '*|*') { ($ln -split '\|')[-1] } else { $ln }
+    return @{ Users = $Title; UPN = $upn; Type = 'Other Principal' }
+}
+
+# ============================================================
+# Core collection
+# ============================================================
+
+function Get-SitePermissionEntries {
+    param (
+        [Microsoft.SharePoint.Client.SecurableObject] $Object,
+        [string] $GroupId
+    )
+
+    $ObjectType = 'Site'
+    $ObjectTitle = $Object.Title
+    $ObjectURL = $Object.Url
+
+    Get-PnPProperty -ClientObject $Object -Property HasUniqueRoleAssignments, RoleAssignments | Out-Null
+    $HasUniquePermissions = $Object.HasUniqueRoleAssignments
+
+    # Generic list instead of array += (array += reallocates on every add, O(n^2))
+    $Rows = [System.Collections.Generic.List[object]]::new()
+
+    # Claims belonging to the site's OWN M365 group are captured here instead of
+    # being written as rows. The individual owner/member rows inherit these
+    # permission levels, which removes the group-claim/member-list redundancy.
+    $SiteGroupIdLower = if ($GroupId) { $GroupId.ToLower() } else { $null }
+    $OwnerGrants = [System.Collections.Generic.List[object]]::new()
+    $MemberGrants = [System.Collections.Generic.List[object]]::new()
+
+    # Batch-load Member and RoleDefinitionBindings for ALL role assignments in
+    # a single CSOM round trip, instead of one Get-PnPProperty call per assignment
+    $Ctx = Get-PnPContext
+    foreach ($RA in $Object.RoleAssignments) {
+        $Ctx.Load($RA.Member)
+        $Ctx.Load($RA.RoleDefinitionBindings)
+    }
+    $Ctx.ExecuteQuery()
+
+    foreach ($RoleAssignment in $Object.RoleAssignments) {
+        $Member = $RoleAssignment.Member
+        $PermissionType = $Member.PrincipalType.ToString()
+
+        $PermissionLevels = ($RoleAssignment.RoleDefinitionBindings |
+            Select-Object -ExpandProperty Name |
+            Where-Object { $_ -ne 'Limited Access' -and $_ -ne 'Web-Only Limited Access' }) -join ','
+        if ([string]::IsNullOrWhiteSpace($PermissionLevels)) { continue }
+
+        $Principal = Resolve-Principal -LoginName $Member.LoginName -Title $Member.Title
+        if ($null -eq $Principal) { continue }
+
+        # Broad claims granted directly at the site level
+        if ($Principal.Type -like 'Claim*') {
+            $Rows.Add((New-PermissionRow -Object $ObjectType -Title $ObjectTitle -URL $ObjectURL `
+                -HasUniquePermissions $HasUniquePermissions -Users $Principal.Users `
+                -UserPrincipalName $Principal.UPN -Type $Principal.Type `
+                -Permissions $PermissionLevels -GrantedThrough 'Direct Permissions'))
+            continue
+        }
+
+        if ($PermissionType -eq 'SharePointGroup') {
+            $GroupMembers = Get-PnPGroupMember -Identity $Member.LoginName -ErrorAction SilentlyContinue
+            if (-not $GroupMembers) { continue }
+
+            foreach ($GroupMember in @($GroupMembers)) {
+                # Classify from LoginName; no per-member CSOM round trips
+                $MP = Resolve-Principal -LoginName $GroupMember.LoginName -Title $GroupMember.Title
+                if ($null -eq $MP) { continue }
+
+                # The site's own group claim: record the grant, skip the row
+                if ($MP.Type -eq 'M365 Group Claim' -and $SiteGroupIdLower -and $MP.Id -eq $SiteGroupIdLower) {
+                    $Grant = [PSCustomObject]@{ Permissions = $PermissionLevels; Via = "SharePoint Group: $($Member.Title)" }
+                    if ($MP.IsOwners) { $OwnerGrants.Add($Grant) } else { $MemberGrants.Add($Grant) }
+                    continue
+                }
+
+                $Rows.Add((New-PermissionRow -Object $ObjectType -Title $ObjectTitle -URL $ObjectURL `
+                    -HasUniquePermissions $HasUniquePermissions -Users $MP.Users `
+                    -UserPrincipalName $MP.UPN -Type $MP.Type `
+                    -Permissions $PermissionLevels `
+                    -GrantedThrough "SharePoint Group: $($Member.Title)"))
+            }
+        }
+        else {
+            # The site's own group claim assigned directly: record, skip the row
+            if ($Principal.Type -eq 'M365 Group Claim' -and $SiteGroupIdLower -and $Principal.Id -eq $SiteGroupIdLower) {
+                $Grant = [PSCustomObject]@{ Permissions = $PermissionLevels; Via = 'Direct Permissions' }
+                if ($Principal.IsOwners) { $OwnerGrants.Add($Grant) } else { $MemberGrants.Add($Grant) }
+                continue
+            }
+
+            $Rows.Add((New-PermissionRow -Object $ObjectType -Title $ObjectTitle -URL $ObjectURL `
+                -HasUniquePermissions $HasUniquePermissions -Users $Principal.Users `
+                -UserPrincipalName $Principal.UPN -Type $Principal.Type `
+                -Permissions $PermissionLevels -GrantedThrough 'Direct Permissions'))
+        }
+    }
+
+    # M365 Group Owners and Members (group-connected sites only).
+    # Direct Graph calls with explicit $select: the PnP wrapper cmdlets can
+    # return objects whose properties don't hydrate, producing blank rows.
+    if ($GroupId -and $GroupId -ne '00000000-0000-0000-0000-000000000000') {
+        try {
+            $Select = '?$select=id,displayName,userPrincipalName,mail'
+            $Owners = Get-GraphCollection -Url "v1.0/groups/$GroupId/owners$Select"
+            $Members = Get-GraphCollection -Url "v1.0/groups/$GroupId/members$Select"
+
+            # Resolve the permission levels the group conveys onto its people.
+            # Fall back to generic labels if the claims were not found on this web.
+            $OwnerPerm = if ($OwnerGrants.Count -gt 0) { (@($OwnerGrants.Permissions) | Select-Object -Unique) -join ',' } else { 'Group Owner' }
+            $OwnerVia = if ($OwnerGrants.Count -gt 0) { 'M365 Group via ' + ((@($OwnerGrants.Via) | Select-Object -Unique) -join '; ') } else { 'Microsoft 365 Group' }
+            $MemberPerm = if ($MemberGrants.Count -gt 0) { (@($MemberGrants.Permissions) | Select-Object -Unique) -join ',' } else { 'Group Member' }
+            $MemberVia = if ($MemberGrants.Count -gt 0) { 'M365 Group via ' + ((@($MemberGrants.Via) | Select-Object -Unique) -join '; ') } else { 'Microsoft 365 Group' }
+
+            foreach ($Owner in $Owners) {
+                $Name = if ($Owner.displayName) { $Owner.displayName } else { $Owner.id }
+                $Upn = if ($Owner.userPrincipalName) { $Owner.userPrincipalName } elseif ($Owner.mail) { $Owner.mail } else { 'N/A' }
+                if (-not $Name) { continue }
+                $Rows.Add((New-PermissionRow -Object $ObjectType -Title $ObjectTitle -URL $ObjectURL `
+                    -HasUniquePermissions $HasUniquePermissions -Users $Name `
+                    -UserPrincipalName $Upn -Type 'M365 Group Owner' `
+                    -Permissions $OwnerPerm -GrantedThrough $OwnerVia))
+            }
+            foreach ($Gm in $Members) {
+                $Name = if ($Gm.displayName) { $Gm.displayName } else { $Gm.id }
+                $Upn = if ($Gm.userPrincipalName) { $Gm.userPrincipalName } elseif ($Gm.mail) { $Gm.mail } else { 'N/A' }
+                if (-not $Name) { continue }
+                $Rows.Add((New-PermissionRow -Object $ObjectType -Title $ObjectTitle -URL $ObjectURL `
+                    -HasUniquePermissions $HasUniquePermissions -Users $Name `
+                    -UserPrincipalName $Upn -Type 'M365 Group Member' `
+                    -Permissions $MemberPerm -GrantedThrough $MemberVia))
+            }
+        }
+        catch {
+            Write-Host -f Yellow "  Could not retrieve M365 Group membership: $($_.Exception.Message)"
+        }
+    }
+
+    return $Rows
+}
+
+function Export-SitePermissionReport {
+    param (
+        [Parameter(Mandatory = $true)] [string] $SiteURL,
+        [Parameter(Mandatory = $true)] [string] $ReportFile,
+        [string] $GroupId,
+        $TenantSite
+    )
+
+    Connect-TargetSite -Url $SiteURL
+    $Web = Get-PnPWeb
+
+    $Rows = [System.Collections.Generic.List[object]]::new()
+
+    # Site Collection Admins
+    $SiteAdmins = Get-PnPSiteCollectionAdmin
+    $SiteCollectionAdmins = (@($SiteAdmins) | Select-Object -ExpandProperty Title) -join ','
+
+    $Rows.Add((New-PermissionRow -Object 'Site Collection' -Title $Web.Title -URL $Web.Url `
+        -HasUniquePermissions $true -Users $SiteCollectionAdmins -UserPrincipalName 'N/A' `
+        -Type 'Site Collection Administrators' -Permissions 'Site Owner' `
+        -GrantedThrough 'Direct Permissions'))
+
+    # Site-level permissions. Wrap in @() because PowerShell unrolls a
+    # single-item return into a bare object, which breaks AddRange.
+    $Rows.AddRange([object[]]@(Get-SitePermissionEntries -Object $Web -GroupId $GroupId))
+
+    # One file write per site: crash-resilient, minimal I/O
+    if ($Rows.Count -gt 0) {
+        $Rows | Export-Csv -Path $ReportFile -NoTypeInformation -Append -Encoding UTF8
+    }
+
+    # Site governance settings: sourced from the tenant site object we already
+    # have from the admin enumeration, so no extra SharePoint calls. Only the
+    # group Visibility lookup costs one Graph request per group-connected site.
+    if ($TenantSite) {
+        $IsGroupSite = $GroupId -and $GroupId -ne '00000000-0000-0000-0000-000000000000'
+        $Visibility = 'N/A (Classic)'
+        if ($IsGroupSite) {
+            try {
+                $G = (Invoke-PnPGraphMethod -Url "v1.0/groups/$GroupId`?`$select=visibility" -Raw) | ConvertFrom-Json
+                $Visibility = $G.visibility
+            }
+            catch { $Visibility = 'Unknown' }
+        }
+
+        [PSCustomObject]@{
+            Title                       = Protect-CsvValue $Web.Title
+            URL                         = $Web.Url
+            Template                    = $TenantSite.Template
+            SiteType                    = if ($IsGroupSite) { 'Modern (Group-connected)' } else { 'Classic / No Group' }
+            GroupVisibility             = $Visibility
+            SharingCapability           = ConvertTo-FriendlySetting -Value $TenantSite.SharingCapability -Map $Script:SharingCapabilityMap
+            DefaultLinkPermission       = ConvertTo-FriendlySetting -Value $TenantSite.DefaultLinkPermission -Map $Script:DefaultLinkPermissionMap
+            DefaultSharingLinkType      = ConvertTo-FriendlySetting -Value $TenantSite.DefaultSharingLinkType -Map $Script:DefaultSharingLinkTypeMap
+            DefaultLinkToExistingAccess = $TenantSite.DefaultLinkToExistingAccess
+            SensitivityLabel            = "$($TenantSite.SensitivityLabel)"
+            IsTeamsConnected            = $TenantSite.IsTeamsConnected
+            ArchiveStatus               = "$($TenantSite.ArchiveStatus)"
+            LockState                   = "$($TenantSite.LockState)"
+            LastContentModifiedDate     = $TenantSite.LastContentModifiedDate
+            StorageUsageCurrentMB       = $TenantSite.StorageUsageCurrent
+        } | Export-Csv -Path $Script:SettingsFile -NoTypeInformation -Append -Encoding UTF8
+    }
+
+    return $Rows.Count
+}
+
+# ============================================================
+# Main
+# ============================================================
+
+$Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+# Ensure output directory exists; refuse to silently overwrite an existing report
+$ReportDir = Split-Path -Path $ReportFile -Parent
+if ($ReportDir -and -not (Test-Path $ReportDir)) {
+    New-Item -ItemType Directory -Path $ReportDir -Force | Out-Null
+}
+if (Test-Path $ReportFile) {
+    throw "Report file already exists: $ReportFile. Remove it or specify a different -ReportFile."
+}
+$Script:SettingsFile = [System.IO.Path]::ChangeExtension($ReportFile, $null) + '_sitesettings.csv'
+if (Test-Path $Script:SettingsFile) {
+    throw "Settings file already exists: $Script:SettingsFile. Remove it first."
+}
+
+Write-Host -f Cyan "Connecting to $TenantAdminURL ($($PSCmdlet.ParameterSetName) auth)..."
+Connect-TargetSite -Url $TenantAdminURL
+
+Write-Host -f Cyan 'Retrieving all site collections...'
+$AllSites = if ($IncludeOneDrive) { Get-PnPTenantSite -IncludeOneDriveSites } else { Get-PnPTenantSite }
+
+# Filter out redirect sites and the mysite host
+$AllSites = @($AllSites | Where-Object {
+    $_.Template -notlike 'RedirectSite*' -and
+    $_.Template -notlike 'SPSMSITEHOST*'
+})
+
+$Total = $AllSites.Count
+Write-Host -f Cyan "Found $Total sites to process.`n"
+
+$Counter = 0
+$TotalRows = 0
+$FailedSites = [System.Collections.Generic.List[object]]::new()
+
+foreach ($Site in $AllSites) {
+    $Counter++
+    Write-Host -f White "[$Counter/$Total] $($Site.Url)"
+    try {
+        $RowCount = Export-SitePermissionReport -SiteURL $Site.Url -ReportFile $ReportFile -GroupId $Site.GroupId -TenantSite $Site
+        $TotalRows += $RowCount
+        Write-Host -f Green "  Done ($RowCount rows)"
+    }
+    catch {
+        $FailedSites.Add([PSCustomObject]@{ Url = $Site.Url; Error = $_.Exception.Message })
+        Write-Host -f Red "  Failed: $($_.Exception.Message)"
+    }
+}
+
+$Stopwatch.Stop()
+
+Write-Host -f Green "`n*** Tenant-Wide Site Permission Report Complete ***"
+Write-Host -f Green "Sites processed : $($Total - $FailedSites.Count)/$Total"
+Write-Host -f Green "Rows written    : $TotalRows"
+Write-Host -f Green "Elapsed         : $($Stopwatch.Elapsed.ToString('hh\:mm\:ss'))"
+Write-Host -f Green "Report          : $ReportFile"
+Write-Host -f Green "Site settings   : $Script:SettingsFile"
+
+if ($FailedSites.Count -gt 0) {
+    $FailLog = [System.IO.Path]::ChangeExtension($ReportFile, $null) + '_failures.csv'
+    $FailedSites | Export-Csv -Path $FailLog -NoTypeInformation -Encoding UTF8
+    Write-Host -f Yellow "`n$($FailedSites.Count) site(s) failed. Details: $FailLog"
+    if (-not $Script:AppOnly) {
+        Write-Host -f Yellow 'Tip: delegated auth only reads sites where your account has access. Use certificate-based app-only auth (-Tenant and -CertificateThumbprint) for full coverage.'
+    }
+}
